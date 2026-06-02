@@ -50,8 +50,8 @@ VSOUT_SLOT_TANGENT     = 1
 VSOUT_SLOT_NORMAL      = 2
 VSOUT_SLOT_UV0         = 4
 
-
 FLIP_WINDING = False
+WRITE_DEBUG_TXT = False
 
 # ==================== Drawcall 查找 ================
 
@@ -110,7 +110,7 @@ def inverse_mat4(m):
 
 INV_VIEW_PROJ = inverse_mat4(VIEW_PROJ)
 
-def mul_mat4_vec3(m, v):
+def mul_mat4_vec4(m, v):
     x, y, z, w = v
 
     return (
@@ -121,7 +121,7 @@ def mul_mat4_vec3(m, v):
     )
 
 def clip_to_world(clip_pos):
-    world_h = mul_mat4_vec3(INV_VIEW_PROJ, clip_pos)
+    world_h = mul_mat4_vec4(INV_VIEW_PROJ, clip_pos)
 
     if world_h[3] == 0.0:
         return world_h[:3]
@@ -196,11 +196,8 @@ def write_mesh_bin(bin_path, attributes):
                 f.write(struct.pack(pack_fmt, *value))
             
             json_attributes[name] = OrderedDict([
-                ("componentType", "FLOAT32"),
                 ("componentCount", component_count),
-                ("byteStride", byte_stride),
                 ("byteOffset", byte_offset),
-                ("byteLength", byte_length),
                 ("count", vertex_count),
             ])
 
@@ -208,27 +205,11 @@ def write_mesh_bin(bin_path, attributes):
     
     return json_attributes, byte_offset, vertex_count
 
-def write_mesh_json(json_path, bin_path, event_id, draw_name, index_count, instance_count, instances, json_attributes, byte_length, vertex_count):
+def write_mesh_json(json_path, bin_path, event_id, instances, json_attributes, byte_length):
     payload = OrderedDict()
 
     payload["version"] = 5
-    payload["source"] = "VS_OUTPUT_WORLD"
     payload["eventId"] = event_id
-    payload["drawName"] = draw_name
-    payload["positionSpace"] = "WORLD"
-
-    payload["geometry"] = OrderedDict([
-        ("primitive", "triangles"),
-        ("vertexCount", vertex_count),
-        ("triangleCount", vertex_count // 3),
-    ])
-
-    payload["draw"] = OrderedDict([
-        ("indexCountPerInstance", index_count),
-        ("instanceCount", instance_count),
-    ])
-
-    payload["instances"] = instances
 
     payload["buffer"] = OrderedDict([
         ("uri", os.path.basename(bin_path)),
@@ -237,39 +218,35 @@ def write_mesh_json(json_path, bin_path, event_id, draw_name, index_count, insta
 
     payload["attributes"] = json_attributes
 
+    if len(instances) > 1:
+        payload["instances"] = instances
+
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
-def write_mesh_files(path_prefix, event_id, draw_name, index_count, instance_count, instances, attributes):
+def write_mesh_files(path_prefix, event_id, instances, attributes):
     bin_path = path_prefix + ".bin"
     json_path = path_prefix + ".json"
 
-    json_attributes, byte_length, vertex_count = write_mesh_bin(bin_path, attributes)
+    json_attributes, byte_length, _vertex_count = write_mesh_bin(bin_path, attributes)
 
     write_mesh_json(
         json_path,
         bin_path,
         event_id,
-        draw_name,
-        index_count,
-        instance_count,
         instances,
         json_attributes,
-        byte_length,
-        vertex_count
+        byte_length
     )
 
     return bin_path, json_path
 
-def write_debug_txt(txt_path, event_id, draw_name, positions, normals, uvs, sv_positions):
+def write_debug_txt(txt_path, event_id, positions, normals, uvs, sv_positions):
     vertex_count = len(positions)
 
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write("# EventId = {}\n".format(event_id))
-        f.write("# Drawcall = {}\n".format(draw_name))
-        f.write("# Source = VS_OUTPUT_WORLD\n")
         f.write("# VertexCount = {}\n".format(vertex_count))
-        f.write("# TriangleCount = {}\n".format(vertex_count // 3))
         f.write("# Columns: i, POSITION.xyz, NORMAL.xyz, UV.xy, SV_POSITION.xyzw\n")
 
         for i in range(vertex_count):
@@ -306,7 +283,6 @@ def append_triangle(raw_bytes, vertex_stride, indices, tri_start, order, positio
 
 def append_instance(controller, instance_id, index_count, positions, normals, uvs, sv_positions, instances):
     vertex_offset = len(positions)
-    triangle_offset = vertex_offset // 3
     
     postvs = controller.GetPostVSData(instance_id, 0, rd.MeshDataStage.VSOut)
 
@@ -343,11 +319,8 @@ def append_instance(controller, instance_id, index_count, positions, normals, uv
     vertex_count = len(positions) - vertex_offset
     
     instances.append(OrderedDict([
-        ("instanceId", instance_id),
         ("vertexOffset", vertex_offset),
-        ("vertexCount", vertex_count),          # TODO
-        ("triangleOffset", triangle_offset),
-        ("triangleCount", vertex_count // 3),
+        ("vertexCount", vertex_count),
     ]))
 
 def export_mesh(controller, event_id, output_dir):
@@ -356,8 +329,6 @@ def export_mesh(controller, event_id, output_dir):
 
     # 获取 drawcall
     draw = get_draw_action(controller, event_id)
-    draw_name = draw.GetName(controller.GetStructuredFile())
-    log("Drawcall: {}".format(draw_name))
 
     controller.SetFrameEvent(event_id, True)
 
@@ -404,30 +375,24 @@ def export_mesh(controller, event_id, output_dir):
     bin_path, json_path = write_mesh_files(
         mesh_prefix,
         event_id, 
-        draw_name,
-        index_count,
-        instance_count,
         instances, 
         attributes
     )
 
-    txt_path = mesh_prefix + ".txt"
-    write_debug_txt(txt_path, event_id, draw_name, positions, normals, uvs, sv_positions)
-
-    log("JSON 文件已写入: {}".format(json_path))
-    log("BIN 文件已写入: {}".format(bin_path))
-    log("调试 TXT 已写入: {}".format(txt_path))
-    log("导出完成")
-    print("=" * 70)
+    txt_path = None
+    if WRITE_DEBUG_TXT:
+        txt_path = mesh_prefix + ".txt"
+        write_debug_txt(txt_path, event_id, positions, normals, uvs, sv_positions)
+        log("调试 TXT 已写入: {}".format(txt_path))
+    
+    log("done eid={} verts={} inst={}".format(event_id, len(positions), instance_count))
 
     return {
-        "event_id": event_id,
-        "drawName": draw_name,
+        "eventId": event_id,
         "vertexCount": len(positions),
-        "triangleCount": len(positions) // 3,
+        "instanceCount": instance_count,
         "jsonPath": json_path,
         "binPath": bin_path,
-        "txtPath": txt_path,
     }
 
 # ==================== 插件入口 ====================
