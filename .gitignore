@@ -1,0 +1,17 @@
+# Python cache
+__pychache__/
+*.py[cod]
+*$py.class
+
+# Build / package
+build/
+dist/
+*.egg-info/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large/generated local files
+ExportResults/
+.codebuddy/

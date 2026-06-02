@@ -1,0 +1,8 @@
+{
+    "extension_api": 1,
+    "name": "RDC2UE",
+    "version": "0.1",
+    "description": "Export current RenderDoc drawcall mesh data to json/bin format.",
+    "author": "Zi Yang",
+    "url": ""
+}
