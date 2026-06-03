@@ -31,12 +31,12 @@ def print_exception(prefix="Exception"):
 DEFAULT_OUTPUT_DIR = r"F:\RDC2UE\ExportResults"
 
 # 人工记录 ViewProjection 矩阵
-# cb1[9-11] 转置
+# cb1[9-11]
 VIEW_PROJ = [
-    [0.98146,   0.19164,   -0.00001,    0.0],
-    [0.00537,  -0.02735,    1.77765,    0.0],
-    [0.0    ,   0.0,        0.0,        1.0],
-    [0.19162,  -0.98135,   -0.01555,    0.0],
+    [0.98146,   0.00537,   0.0,        0.19162],
+    [0.19164,  -0.02735,   0.0,       -0.98135],
+    [-0.00001,  1.77765,   0.0,       -0.01555],
+    [0.0,       0.0,       1.0,        0.0],
 ]
 
 # VS Output
@@ -108,7 +108,16 @@ def inverse_mat4(m):
 
     return inv
 
-INV_VIEW_PROJ = inverse_mat4(VIEW_PROJ)
+def transpose_mat4(m):
+    return [
+        [m[0][0], m[1][0], m[2][0], m[3][0]],
+        [m[0][1], m[1][1], m[2][1], m[3][1]],
+        [m[0][2], m[1][2], m[2][2], m[3][2]],
+        [m[0][3], m[1][3], m[2][3], m[3][3]],
+    ]
+
+VIEW_PROJ_FOR_PYTHON = transpose_mat4(VIEW_PROJ)
+INV_VIEW_PROJ = inverse_mat4(VIEW_PROJ_FOR_PYTHON)
 
 def mul_mat4_vec4(m, v):
     x, y, z, w = v
@@ -154,7 +163,7 @@ def read_vsout_vertex(raw_bytes, vertex_index, vertex_stride):
     normal = normalize3(normal4[:3])
     uv0 = (uv4[0], uv4[1])
 
-    return position, normal, uv0, sv_position
+    return position, normal, uv0
 
 def read_postvs_indices(controller, postvs, index_count):
     index_stride = postvs.indexByteStride
@@ -208,7 +217,6 @@ def write_mesh_bin(bin_path, attributes):
 def write_mesh_json(json_path, bin_path, event_id, instances, json_attributes, byte_length):
     payload = OrderedDict()
 
-    payload["version"] = 5
     payload["eventId"] = event_id
 
     payload["buffer"] = OrderedDict([
@@ -241,47 +249,43 @@ def write_mesh_files(path_prefix, event_id, instances, attributes):
 
     return bin_path, json_path
 
-def write_debug_txt(txt_path, event_id, positions, normals, uvs, sv_positions):
+def write_debug_txt(txt_path, event_id, positions, normals, uvs):
     vertex_count = len(positions)
 
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write("# EventId = {}\n".format(event_id))
         f.write("# VertexCount = {}\n".format(vertex_count))
-        f.write("# Columns: i, POSITION.xyz, NORMAL.xyz, UV.xy, SV_POSITION.xyzw\n")
+        f.write("# Columns: i, POSITION.xyz, NORMAL.xyz, UV.xy\n")
 
         for i in range(vertex_count):
             p = positions[i]
             n = normals[i]
             uv = uvs[i]
-            sv = sv_positions[i]
 
             f.write(
                 "{}, "
                 "{:.6f}, {:.6f}, {:.6f}, "
                 "{:.6f}, {:.6f}, {:.6f}, "
-                "{:.6f}, {:.6f}, "
-                "{:.6f}, {:.6f}, {:.6f}, {:.6f}\n".format(
+                "{:.6f}, {:.6f}\n".format(
                     i,
                     p[0], p[1], p[2],
                     n[0], n[1], n[2],
                     uv[0], uv[1],
-                    sv[0], sv[1], sv[2], sv[3],
                 )
             )
 
-def append_triangle(raw_bytes, vertex_stride, indices, tri_start, order, positions, normals, uvs, sv_positions):
+def append_triangle(raw_bytes, vertex_stride, indices, tri_start, order, positions, normals, uvs):
     for local_index in order:
         index_pos = tri_start + local_index
         vertex_index = indices[index_pos]
 
-        position, normal, uv, sv_position = read_vsout_vertex(raw_bytes, vertex_index, vertex_stride)
+        position, normal, uv = read_vsout_vertex(raw_bytes, vertex_index, vertex_stride)
 
         positions.append(position)
         normals.append(normal)
         uvs.append(uv)
-        sv_positions.append(sv_position)
 
-def append_instance(controller, instance_id, index_count, positions, normals, uvs, sv_positions, instances):
+def append_instance(controller, instance_id, index_count, positions, normals, uvs, instances):
     vertex_offset = len(positions)
     
     postvs = controller.GetPostVSData(instance_id, 0, rd.MeshDataStage.VSOut)
@@ -312,8 +316,7 @@ def append_instance(controller, instance_id, index_count, positions, normals, uv
             order, 
             positions, 
             normals, 
-            uvs, 
-            sv_positions
+            uvs
         )
     
     vertex_count = len(positions) - vertex_offset
@@ -340,7 +343,6 @@ def export_mesh(controller, event_id, output_dir):
     positions = []
     normals = []
     uvs = []
-    sv_positions = []
     instances = []
 
     for instance_id in range(instance_count):
@@ -351,7 +353,6 @@ def export_mesh(controller, event_id, output_dir):
             positions,
             normals,
             uvs,
-            sv_positions,
             instances
         )
 
@@ -382,7 +383,7 @@ def export_mesh(controller, event_id, output_dir):
     txt_path = None
     if WRITE_DEBUG_TXT:
         txt_path = mesh_prefix + ".txt"
-        write_debug_txt(txt_path, event_id, positions, normals, uvs, sv_positions)
+        write_debug_txt(txt_path, event_id, positions, normals, uvs)
         log("调试 TXT 已写入: {}".format(txt_path))
     
     log("done eid={} verts={} inst={}".format(event_id, len(positions), instance_count))
