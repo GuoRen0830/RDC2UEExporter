@@ -1,5 +1,5 @@
 # RDC2UE RenderDoc Mesh Exporter
-# 从 RenderDoc 指定的 drawcall 中导出 mesh 顶点数据为 JSON + BIN
+# 从 RenderDoc 中导出 mesh 顶点数据为 JSON + BIN
 
 import os
 import json
@@ -319,10 +319,6 @@ def append_instance(controller, instance_id, index_count, positions, normals, uv
     )
 
     indices = read_postvs_indices(controller, postvs, index_count)
-
-    log("Instance {}: vertexStride={}, vertexRawBytes={}, maxIndex={}".format(
-        instance_id, vertex_stride, len(raw_bytes), max(indices)
-    ))
     
     order = (0, 2, 1) if FLIP_WINDING else (0, 1, 2)
     triangle_index_count = (index_count // 3) * 3
@@ -351,7 +347,6 @@ def append_instance(controller, instance_id, index_count, positions, normals, uv
 def export_mesh(controller, event_id, output_dir):
     os.makedirs(output_dir, exist_ok=True)
 
-    print("=" * 70)
     log("开始导出 EventId = {}".format(event_id))
 
     # 获取 drawcall
@@ -412,8 +407,6 @@ def export_mesh(controller, event_id, output_dir):
         txt_path = mesh_prefix + ".txt"
         write_debug_txt(txt_path, event_id, positions, normals, uvs)
         log("调试 TXT 已写入: {}".format(txt_path))
-    
-    log("done eid={} verts={} inst={}".format(event_id, len(positions), instance_count))
 
     return {
         "eventId": event_id,

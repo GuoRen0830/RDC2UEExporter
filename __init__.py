@@ -20,8 +20,8 @@ def export_current_draw_callback(ctx, data):
     except Exception as e:
         _log("Export failed: {}".format(e))
 
-RANGE_START_EID = 9221
-RANGE_END_EID = 9892
+RANGE_START_EID = 7890
+RANGE_END_EID = 13075
 
 def export_draw_range_callback(ctx, data):
     _log("Export Draw Range clicked")
