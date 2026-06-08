@@ -11,12 +11,12 @@ import renderdoc as rd
 
 # ==================== 全局配置 ====================
 
-RANGE_START_EID = 178
-RANGE_END_EID = 1220
+RANGE_START_EID = 7890
+RANGE_END_EID = 13075
 
 DEFAULT_OUTPUT_DIR = r"F:\RDC2UE\ExportResults"
 
-EXPORT_PROFILE = "mobile" # "pc" | "mobile"
+EXPORT_PROFILE = "pc" # "pc" | "mobile"
 
 # VS Output layout
 if EXPORT_PROFILE == "pc":
@@ -40,20 +40,20 @@ elif EXPORT_PROFILE == "mobile":
 
 # 需人工记录 ViewProjection 矩阵
 # pc cb1[8-11]
-#VIEW_PROJ = [
-#    [0.98146,   0.00537,   0.0,        0.19162],
-#    [0.19164,  -0.02735,   0.0,       -0.98135],
-#    [-0.00001,  1.77765,   0.0,       -0.01555],
-#    [0.0,       0.0,       1.0,        0.0],
-#]
-
-# mobile vu_h[7-10]
 VIEW_PROJ = [
-    [0.01399,  -0.27182,   0.0,      -0.04767],
-    [0.08591,   0.04426,   0.0,      -0.29278],
-    [0.57622,   0.0,       0.0,       0.04481],
-    [0.0,       0.0,       1.0,       0.0],
+    [0.98146,   0.00537,   0.0,        0.19162],
+    [0.19164,  -0.02735,   0.0,       -0.98135],
+    [-0.00001,  1.77765,   0.0,       -0.01555],
+    [0.0,       0.0,       1.0,        0.0],
 ]
+
+# mobile
+#VIEW_PROJ = [
+#    [0.01399,  -0.27182,   0.0,      -0.04767],
+#    [0.08591,   0.04426,   0.0,      -0.29278],
+#    [0.57622,   0.0,       0.0,       0.04481],
+#    [0.0,       0.0,       1.0,       0.0],
+#]
 
 FLIP_WINDING = False
 
@@ -154,25 +154,12 @@ def mul_mat4_vec4(m, v):
 
 def clip_to_world(clip_pos):
     world_h = mul_mat4_vec4(INV_VIEW_PROJ, clip_pos)
-    
+
+    if world_h[3] == 0.0:
+        return world_h[:3]
+
     inv_w = 1.0 / world_h[3]
-    position = (
-        world_h[0] * inv_w,
-        world_h[1] * inv_w,
-        world_h[2] * inv_w
-    )
-
-    return position
-
-def normalize3(v):
-    x, y, z = v
-    length = x * x + y * y + z * z
-
-    if length <= 0.0:
-        return (0.0, 0.0, 1.0)
-    
-    inv_len = length ** -0.5
-    return (x * inv_len, y * inv_len, z * inv_len)
+    return (world_h[0] * inv_w, world_h[1] * inv_w, world_h[2] * inv_w)
 
 # ==================== VS Output 读取函数 ====================
 
@@ -182,14 +169,17 @@ def read_float4(raw_bytes, vertex_index, vertex_stride, float4_slot):
 
 def read_vsout_vertex(raw_bytes, vertex_index, vertex_stride):
     sv_position = read_float4(raw_bytes, vertex_index, vertex_stride, VSOUT_SLOT_SV_POSITION)
+    tangent4 = read_float4(raw_bytes, vertex_index, vertex_stride, VSOUT_SLOT_TANGENT)
     normal4 = read_float4(raw_bytes, vertex_index, vertex_stride, VSOUT_SLOT_NORMAL)
     uv4 = read_float4(raw_bytes, vertex_index, vertex_stride, VSOUT_SLOT_UV0)
 
     position = clip_to_world(sv_position)
-    normal = normalize3(normal4[:3])
+    tangent = tangent4[:3]
+    binormal_sign = tangent4[3]
+    normal = normal4[:3]
     uv0 = (uv4[0], uv4[1])
 
-    return position, normal, uv0
+    return position, tangent, binormal_sign, normal, uv0
 
 def read_postvs_indices(controller, postvs, index_count):
     index_stride = postvs.indexByteStride
@@ -208,6 +198,60 @@ def read_postvs_indices(controller, postvs, index_count):
         indices.append(struct.unpack_from(fmt, index_bytes, offset)[0])
     
     return indices
+
+# ==================== 组装顶点数据 ==================== 
+
+def append_triangle(raw_bytes, vertex_stride, indices, tri_start, order, positions, tangents, binormal_signs, normals, uvs):
+    for local_index in order:
+        index_pos = tri_start + local_index
+        vertex_index = indices[index_pos]
+
+        position, tangent, binormal_sign, normal, uv = read_vsout_vertex(raw_bytes, vertex_index, vertex_stride)
+
+        positions.append(position)
+        tangents.append(tangent)
+        binormal_signs.append((binormal_sign,))
+        normals.append(normal)
+        uvs.append(uv)
+
+def append_instance(controller, instance_id, index_count, positions, tangents, binormal_signs, normals, uvs, instances):
+    vertex_offset = len(positions)
+    
+    postvs = controller.GetPostVSData(instance_id, 0, rd.MeshDataStage.VSOut)
+
+    vertex_stride = postvs.vertexByteStride
+
+    raw_bytes = controller.GetBufferData(
+        postvs.vertexResourceId,
+        postvs.vertexByteOffset,
+        0
+    )
+
+    indices = read_postvs_indices(controller, postvs, index_count)
+    
+    order = (0, 2, 1) if FLIP_WINDING else (0, 1, 2)
+    triangle_index_count = (index_count // 3) * 3
+
+    for tri_start in range(0, triangle_index_count, 3):
+        append_triangle(
+            raw_bytes, 
+            vertex_stride, 
+            indices, 
+            tri_start, 
+            order, 
+            positions,
+            tangents,
+            binormal_signs, 
+            normals, 
+            uvs
+        )
+    
+    vertex_count = len(positions) - vertex_offset
+    
+    instances.append(OrderedDict([
+        ("vertexOffset", vertex_offset),
+        ("vertexCount", vertex_count),
+    ]))
 
 # ==================== 写文件 ====================
 
@@ -291,56 +335,6 @@ def write_scene_json(scene_path, mesh_results):
     with open(scene_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
-# ==================== 组装顶点数据 ==================== 
-
-def append_triangle(raw_bytes, vertex_stride, indices, tri_start, order, positions, normals, uvs):
-    for local_index in order:
-        index_pos = tri_start + local_index
-        vertex_index = indices[index_pos]
-
-        position, normal, uv = read_vsout_vertex(raw_bytes, vertex_index, vertex_stride)
-
-        positions.append(position)
-        normals.append(normal)
-        uvs.append(uv)
-
-def append_instance(controller, instance_id, index_count, positions, normals, uvs, instances):
-    vertex_offset = len(positions)
-    
-    postvs = controller.GetPostVSData(instance_id, 0, rd.MeshDataStage.VSOut)
-
-    vertex_stride = postvs.vertexByteStride
-
-    raw_bytes = controller.GetBufferData(
-        postvs.vertexResourceId,
-        postvs.vertexByteOffset,
-        0
-    )
-
-    indices = read_postvs_indices(controller, postvs, index_count)
-    
-    order = (0, 2, 1) if FLIP_WINDING else (0, 1, 2)
-    triangle_index_count = (index_count // 3) * 3
-
-    for tri_start in range(0, triangle_index_count, 3):
-        append_triangle(
-            raw_bytes, 
-            vertex_stride, 
-            indices, 
-            tri_start, 
-            order, 
-            positions, 
-            normals, 
-            uvs
-        )
-    
-    vertex_count = len(positions) - vertex_offset
-    
-    instances.append(OrderedDict([
-        ("vertexOffset", vertex_offset),
-        ("vertexCount", vertex_count),
-    ]))
-
 # ==================== 主流程 ==================== 
 
 def export_mesh(controller, event_id, output_dir):
@@ -362,6 +356,8 @@ def export_mesh(controller, event_id, output_dir):
 
     # 拼装三角形
     positions = []
+    tangents = []
+    binormal_signs = []
     normals = []
     uvs = []
     instances = []
@@ -372,6 +368,8 @@ def export_mesh(controller, event_id, output_dir):
             instance_id,
             index_count,
             positions,
+            tangents,
+            binormal_signs,
             normals,
             uvs,
             instances
@@ -382,6 +380,14 @@ def export_mesh(controller, event_id, output_dir):
         ("POSITION", {
             "data": positions,
             "componentCount": 3,
+        }),
+        ("TANGENT", {
+            "data": tangents,
+            "componentCount": 3,
+        }),
+        ("BINORMAL_SIGN", {
+            "data": binormal_signs,
+            "componentCount": 1,
         }),
         ("NORMAL", {
             "data": normals,
