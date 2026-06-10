@@ -20,6 +20,9 @@ import renderdoc as rd
 RANGE_START_EID = 7890
 RANGE_END_EID = 13075
 
+RANGE_START_EID = 9197
+RANGE_END_EID = 9892
+
 DEFAULT_OUTPUT_DIR = r"F:\RDC2UE\ExportResults"
 
 EXPORT_PROFILE = "pc" # "pc" | "mobile"
@@ -140,7 +143,7 @@ def make_texture_filename(texture_id):
     texture_id_text = str(texture_id)
     texture_id_text = texture_id_text.replace("ResourceId::", "")
 
-    return "T_{}.png".format(texture_id_text)
+    return "T_{}_rdc.png".format(texture_id_text)
 
 
 def make_texture_path(paths, texture_id):
