@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RenderDoc/3DMigoto decompiled pixel shader -> UE4 Custom node HLSL.
+RenderDoc/3DMigoto pixel shader -> UE4 Custom node HLSL.
 
 The generated HLSL follows the data layout used by the working manual shader:
 
@@ -22,18 +22,15 @@ The generated HLSL follows the data layout used by the working manual shader:
 Only standard-library modules are required.
 """
 
-import argparse
 import json
 import os
 import re
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-
-TOOL_VERSION = "2.0"
+TOOL_VERSION = "2.4"
 DEFAULT_OUTPUT_SUFFIX = "_ue_custom_bridge"
-DEFAULT_DATA_TEXTURE_WIDTH = 4096
+DEFAULT_DATA_TEXTURE_WIDTH = 8192
 
 INTERPOLATION_TOKENS = {
     "linear",
@@ -86,15 +83,30 @@ PLACEHOLDER_RE = re.compile(
     r"\s*;\s*$"
 )
 
+UAV_WRITE_TYPES = {
+    "store_uav_typed": "typed_buffer",
+    "store_uav_raw": "raw_buffer",
+    "store_uav_structured": "structured_buffer",
+    "store_structured": "structured_buffer",
+}
+
+UAV_UNSUPPORTED_RE = re.compile(
+    r"\b("
+    r"ld_uav_(?:typed|raw|structured)|"
+    r"atomic_[A-Za-z_]\w*|"
+    r"imm_atomic_[A-Za-z_]\w*|"
+    r"uav_counter|"
+    r"consume|append"
+    r")\b",
+    re.IGNORECASE,
+)
 
 # -----------------------------------------------------------------------------
 # Basic text helpers
 # -----------------------------------------------------------------------------
 
-
 def read_text(path: Union[str, os.PathLike]) -> str:
     return Path(path).read_text(encoding="utf-8-sig")
-
 
 def write_text(path: Union[str, os.PathLike], text: str) -> None:
     """Write UTF-8 text using an API compatible with RenderDoc's Python."""
@@ -104,10 +116,8 @@ def write_text(path: Union[str, os.PathLike], text: str) -> None:
     with open(str(path), "w", encoding="utf-8", newline="\n") as file:
         file.write(text)
 
-
 def write_json(path: Union[str, os.PathLike], payload: Any) -> None:
     write_text(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
-
 
 def mask_comments(text: str) -> str:
     """Replace comments with spaces while preserving character positions."""
@@ -143,7 +153,6 @@ def mask_comments(text: str) -> str:
 
     return "".join(result)
 
-
 def find_matching(text: str, open_pos: int, open_char: str, close_char: str) -> int:
     depth = 0
 
@@ -156,7 +165,6 @@ def find_matching(text: str, open_pos: int, open_char: str, close_char: str) -> 
                 return i
 
     raise ValueError(f"No matching {close_char!r} found")
-
 
 def split_top_level(text: str) -> List[str]:
     """Split a comma-separated list without splitting nested expressions."""
@@ -190,23 +198,19 @@ def split_top_level(text: str) -> List[str]:
 
     return result
 
-
 def replace_token(text: str, old: str, new: str) -> str:
     return re.sub(rf"\b{re.escape(old)}\b", new, text)
-
 
 def parse_literal(text: str) -> str:
     value = text.strip()
     match = re.fullmatch(r"l\s*\(\s*(.*?)\s*\)", value)
     return match.group(1).strip() if match else value
 
-
 def cast_int(text: str) -> str:
     value = parse_literal(text)
     if re.fullmatch(r"[+-]?(?:\d+|0[xX][0-9A-Fa-f]+)", value):
         return value
     return f"(int)({value})"
-
 
 def remove_outer_indent(body: str) -> str:
     lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -223,18 +227,15 @@ def remove_outer_indent(body: str) -> str:
 
     return "\n".join(lines)
 
-
 def remove_final_void_return(body: str) -> str:
     # A decompiler may place the final `return;` on its own line or after
     # another statement. A UE Custom expression needs only the value-return
     # appended by this converter.
     return re.sub(r"\breturn\s*;", "", body).rstrip()
 
-
 # -----------------------------------------------------------------------------
 # Main function, parameters and declarations
 # -----------------------------------------------------------------------------
-
 
 def find_main_shell(source: str) -> Dict[str, str]:
     masked = mask_comments(source)
@@ -258,7 +259,6 @@ def find_main_shell(source: str) -> Dict[str, str]:
         "body": source[open_brace + 1 : close_brace],
         "suffix": source[close_brace + 1 :],
     }
-
 
 def parse_parameter(raw: str) -> Optional[Dict[str, Any]]:
     text = " ".join(raw.split())
@@ -294,7 +294,6 @@ def parse_parameter(raw: str) -> Optional[Dict[str, Any]]:
         "interpolation": interpolation,
     }
 
-
 def parse_parameters(text: str) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for raw in split_top_level(text):
@@ -302,7 +301,6 @@ def parse_parameters(text: str) -> List[Dict[str, Any]]:
         if parameter:
             result.append(parameter)
     return result
-
 
 def parse_hlsl_type(type_name: str) -> Optional[Tuple[str, int]]:
     match = re.fullmatch(
@@ -312,7 +310,6 @@ def parse_hlsl_type(type_name: str) -> Optional[Tuple[str, int]]:
     if not match:
         return None
     return match.group(1), int(match.group(2) or "1")
-
 
 def zero_value(type_name: str) -> str:
     info = parse_hlsl_type(type_name)
@@ -326,10 +323,8 @@ def zero_value(type_name: str) -> str:
         return scalar
     return f"{base}{count}({', '.join([scalar] * count)})"
 
-
 def semantic_matches(semantic: str, base: str) -> bool:
     return re.fullmatch(rf"{re.escape(base.upper())}\d*", semantic.upper()) is not None
-
 
 def target_index(semantic: str) -> Optional[int]:
     semantic = semantic.strip().upper()
@@ -338,11 +333,9 @@ def target_index(semantic: str) -> Optional[int]:
     match = re.fullmatch(r"SV_TARGET(\d+)", semantic)
     return int(match.group(1)) if match else None
 
-
 # -----------------------------------------------------------------------------
 # Resource reflection
 # -----------------------------------------------------------------------------
-
 
 def collect_bad_buffer_specs(body: str) -> Dict[int, Dict[str, Any]]:
     result: Dict[int, Dict[str, Any]] = {}
@@ -390,13 +383,11 @@ def collect_bad_buffer_specs(body: str) -> Dict[int, Dict[str, Any]]:
 
     return result
 
-
 def type_byte_size(type_name: Optional[str]) -> Optional[int]:
     match = re.fullmatch(r"(?:float|half|int|uint)([1-4])?", str(type_name or "").strip())
     if not match:
         return None
     return int(match.group(1) or "1") * 4
-
 
 def parse_resources(prefix: str, body: str) -> Dict[str, Any]:
     type_pattern = "|".join(sorted(RESOURCE_TYPES, key=len, reverse=True))
@@ -469,7 +460,6 @@ def parse_resources(prefix: str, body: str) -> Dict[str, Any]:
         "constantBuffers": parse_cbuffers(prefix),
     }
 
-
 def parse_cbuffers(prefix: str) -> List[Dict[str, Any]]:
     masked = mask_comments(prefix)
     cbuffer_re = re.compile(
@@ -509,15 +499,12 @@ def parse_cbuffers(prefix: str) -> List[Dict[str, Any]]:
 
     return result
 
-
 # -----------------------------------------------------------------------------
 # Texture call conversion
 # -----------------------------------------------------------------------------
 
-
 def texture_input_name(slot: int) -> str:
     return f"T{slot}"
-
 
 def safe_resource_value(element_type: Optional[str]) -> str:
     """Safe fallback with a non-zero last component."""
@@ -536,7 +523,6 @@ def safe_resource_value(element_type: Optional[str]) -> str:
     values = [zero] * count
     values[-1] = one
     return f"{base}{count}({', '.join(values)})"
-
 
 def find_resource_calls(body: str, resource: Dict[str, Any]) -> List[Dict[str, Any]]:
     masked = mask_comments(body)
@@ -560,26 +546,83 @@ def find_resource_calls(body: str, resource: Dict[str, Any]) -> List[Dict[str, A
 
     return calls
 
-
 def sampler_input_for_call(
     texture: Dict[str, Any],
     arguments: List[str],
     sampler_slots: Dict[str, int],
     texture_slots: Set[int],
-) -> Tuple[str, Optional[int]]:
+) -> Tuple[str, int, Optional[int]]:
+    """Return generated UE sampler name, owner texture slot, and source sN."""
+    source_sampler_slot: Optional[int] = None
+
     if arguments:
         sampler_token = arguments[0].strip()
-        slot = sampler_slots.get(sampler_token)
-        if slot is not None and slot in texture_slots:
-            return f"T{slot}Sampler", slot
+        source_sampler_slot = sampler_slots.get(sampler_token)
 
-    return f"T{texture['slot']}Sampler", texture["slot"]
+    # UE Custom nodes expose a sampler through a Texture Object input rather
+    # than through an independent SamplerState input. Prefer the texture whose
+    # tN matches sN when it exists; otherwise use the sampled texture itself.
+    owner_slot = texture["slot"]
+    if source_sampler_slot is not None and source_sampler_slot in texture_slots:
+        owner_slot = source_sampler_slot
 
+    return f"T{owner_slot}Sampler", owner_slot, source_sampler_slot
 
-def replace_texture_accesses(body: str, resources: Dict[str, Any]) -> Tuple[str, Set[int], Set[int], List[str]]:
+def normalize_texture_usage(
+    usage_map: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+
+    for slot in sorted(usage_map):
+        usage = usage_map[slot]
+        operations = sorted(usage["operations"])
+
+        result.append(
+            {
+                "slot": slot,
+                "operations": operations,
+                "sampled": bool(operations),
+                "samplerCarrier": bool(usage["samplerCarrier"]),
+                "samplerSlots": sorted(usage["samplerSlots"]),
+                "samplerOwnerSlots": sorted(usage["samplerOwnerSlots"]),
+                "isDataTexture": "Load" in operations,
+            }
+        )
+
+    return result
+
+def normalize_texture_sampler_uses(
+    sampler_uses: Dict[Tuple[int, Optional[int], int], Set[str]],
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+
+    for key in sorted(
+        sampler_uses,
+        key=lambda item: (
+            item[0],
+            -1 if item[1] is None else item[1],
+            item[2],
+        ),
+    ):
+        texture_slot, sampler_slot, owner_slot = key
+        result.append(
+            {
+                "textureSlot": texture_slot,
+                "samplerSlot": sampler_slot,
+                "samplerOwnerSlot": owner_slot,
+                "operations": sorted(sampler_uses[key]),
+            }
+        )
+
+    return result
+
+def replace_texture_accesses(
+    body: str,
+    resources: Dict[str, Any],
+) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
     replacements: List[Tuple[int, int, str]] = []
-    used_texture_slots: Set[int] = set()
-    sampler_owner_slots: Set[int] = set()
+    usage_map: Dict[int, Dict[str, Any]] = {}
+    sampler_uses: Dict[Tuple[int, Optional[int], int], Set[str]] = {}
     warnings: List[str] = []
 
     texture_slots = {
@@ -587,6 +630,17 @@ def replace_texture_accesses(body: str, resources: Dict[str, Any]) -> Tuple[str,
         for item in resources["textures"]
         if item["type"] == "Texture2D"
     }
+
+    def usage_for(slot: int) -> Dict[str, Any]:
+        return usage_map.setdefault(
+            slot,
+            {
+                "operations": set(),
+                "samplerCarrier": False,
+                "samplerSlots": set(),
+                "samplerOwnerSlots": set(),
+            },
+        )
 
     for texture in resources["textures"]:
         calls = find_resource_calls(body, texture)
@@ -602,43 +656,77 @@ def replace_texture_accesses(body: str, resources: Dict[str, Any]) -> Tuple[str,
                 warnings.append(
                     f"{texture['name']}.{operation} was replaced by {replacement}"
                 )
-            else:
-                input_name = texture_input_name(texture["slot"])
-                sampler_name, sampler_owner = sampler_input_for_call(
+                replacements.append((call["start"], call["end"], replacement))
+                continue
+
+            input_name = texture_input_name(texture["slot"])
+            texture_usage = usage_for(texture["slot"])
+
+            if operation == "Sample" and len(arguments) == 2:
+                sampler_name, owner_slot, source_sampler_slot = sampler_input_for_call(
                     texture,
                     arguments,
                     resources["samplers"],
                     texture_slots,
                 )
-
-                used_texture_slots.add(texture["slot"])
-                if sampler_owner is not None:
-                    sampler_owner_slots.add(sampler_owner)
-
-                if operation == "Sample" and len(arguments) == 2:
-                    replacement = f"Texture2DSample({input_name}, {sampler_name}, {arguments[1]})"
-                elif operation == "SampleBias" and len(arguments) == 3:
-                    replacement = f"Texture2DSampleBias({input_name}, {sampler_name}, {arguments[1]}, {arguments[2]})"
-                elif operation == "SampleLevel" and len(arguments) == 3:
-                    replacement = f"Texture2DSampleLevel({input_name}, {sampler_name}, {arguments[1]}, {arguments[2]})"
-                elif operation == "SampleGrad" and len(arguments) == 4:
-                    replacement = f"Texture2DSampleGrad({input_name}, {sampler_name}, {arguments[1]}, {arguments[2]}, {arguments[3]})"
-                elif operation == "Load":
-                    location = f"(int3)({arguments[0]})"
-
-                    if len(arguments) == 1:
-                        replacement = (f"{input_name}.Load({location})")
-                    else:
-                         replacement = (
-                            f"{input_name}.Load("
-                            f"{location}, "
-                            f"(int2)({arguments[1]}))"
-                        )
+                replacement = f"Texture2DSample({input_name}, {sampler_name}, {arguments[1]})"
+            elif operation == "SampleBias" and len(arguments) == 3:
+                sampler_name, owner_slot, source_sampler_slot = sampler_input_for_call(
+                    texture,
+                    arguments,
+                    resources["samplers"],
+                    texture_slots,
+                )
+                replacement = f"Texture2DSampleBias({input_name}, {sampler_name}, {arguments[1]}, {arguments[2]})"
+            elif operation == "SampleLevel" and len(arguments) == 3:
+                sampler_name, owner_slot, source_sampler_slot = sampler_input_for_call(
+                    texture,
+                    arguments,
+                    resources["samplers"],
+                    texture_slots,
+                )
+                replacement = f"Texture2DSampleLevel({input_name}, {sampler_name}, {arguments[1]}, {arguments[2]})"
+            elif operation == "SampleGrad" and len(arguments) == 4:
+                sampler_name, owner_slot, source_sampler_slot = sampler_input_for_call(
+                    texture,
+                    arguments,
+                    resources["samplers"],
+                    texture_slots,
+                )
+                replacement = f"Texture2DSampleGrad({input_name}, {sampler_name}, {arguments[1]}, {arguments[2]}, {arguments[3]})"
+            elif operation == "Load" and arguments:
+                location = f"(int3)({arguments[0]})"
+                if len(arguments) == 1:
+                    replacement = f"{input_name}.Load({location})"
                 else:
-                    warnings.append(
-                        f"Unsupported call left unchanged: {texture['name']}.{operation}"
+                    replacement = (
+                        f"{input_name}.Load("
+                        f"{location}, "
+                        f"(int2)({arguments[1]}))"
                     )
-                    continue
+
+                texture_usage["operations"].add(operation)
+                replacements.append((call["start"], call["end"], replacement))
+                continue
+            else:
+                warnings.append(
+                    f"Unsupported call left unchanged: {texture['name']}.{operation}"
+                )
+                continue
+
+            texture_usage["operations"].add(operation)
+            texture_usage["samplerOwnerSlots"].add(owner_slot)
+
+            if source_sampler_slot is not None:
+                texture_usage["samplerSlots"].add(source_sampler_slot)
+
+            if owner_slot != texture["slot"]:
+                usage_for(owner_slot)["samplerCarrier"] = True
+
+            sampler_uses.setdefault(
+                (texture["slot"], source_sampler_slot, owner_slot),
+                set(),
+            ).add(operation)
 
             replacements.append((call["start"], call["end"], replacement))
 
@@ -646,13 +734,16 @@ def replace_texture_accesses(body: str, resources: Dict[str, Any]) -> Tuple[str,
     for start, end, replacement in sorted(replacements, reverse=True):
         result = result[:start] + replacement + result[end:]
 
-    return result, used_texture_slots, sampler_owner_slots, warnings
-
+    return (
+        result,
+        normalize_texture_usage(usage_map),
+        normalize_texture_sampler_uses(sampler_uses),
+        warnings,
+    )
 
 # -----------------------------------------------------------------------------
 # Constant-buffer conversion
 # -----------------------------------------------------------------------------
-
 
 def replace_cb_accesses(body: str, cbuffers: List[Dict[str, Any]]) -> Tuple[str, Set[int]]:
     member_to_slot: Dict[str, int] = {}
@@ -693,11 +784,9 @@ def replace_cb_accesses(body: str, cbuffers: List[Dict[str, Any]]) -> Tuple[str,
 
     return result, used_slots
 
-
 # -----------------------------------------------------------------------------
 # Decompiled buffer-instruction conversion
 # -----------------------------------------------------------------------------
-
 
 def parse_register_operand(text: str) -> Optional[Dict[str, str]]:
     match = re.fullmatch(
@@ -707,7 +796,6 @@ def parse_register_operand(text: str) -> Optional[Dict[str, str]]:
     if not match:
         return None
     return {"name": match.group("name"), "mask": match.group("mask") or "xyzw"}
-
 
 def parse_bad_buffer_instruction(line: str) -> Optional[Dict[str, Any]]:
     match = re.match(
@@ -780,7 +868,6 @@ def parse_bad_buffer_instruction(line: str) -> Optional[Dict[str, Any]]:
 
     return result
 
-
 def buffer_byte_address(info: Dict[str, Any], spec: Dict[str, Any]) -> str:
     buffer_type = spec.get("type") or info["bufferType"]
     stride = info.get("stride") or spec.get("stride")
@@ -803,11 +890,9 @@ def buffer_byte_address(info: Dict[str, Any], spec: Dict[str, Any]) -> str:
 
     return f"((int)({info['index']})) * {stride}"
 
-
 def result_swizzle(info: Dict[str, Any]) -> str:
     count = len(info["destinationMask"])
     return (info["resourceMask"] + "xyzw")[:count]
-
 
 def try_fuse_raw_consumer(
     next_line: str,
@@ -840,7 +925,6 @@ def try_fuse_raw_consumer(
         return f"{indent}{destination} = {neg}(float)({raw_expression} {op} 0u);"
 
     return None
-
 
 def replace_buffer_instructions(
     body: str,
@@ -908,11 +992,97 @@ def replace_buffer_instructions(
 
     return transformed, used_specs
 
+# -----------------------------------------------------------------------------
+# UAV side-effect conversion
+# -----------------------------------------------------------------------------
+
+def strip_uav_side_effects(
+    body: str,
+) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+    """Remove write-only UAV instructions that cannot be reproduced by a UE material.
+
+    Write-only stores do not feed values back into the material outputs, so they
+    are removed and recorded as preview-only side effects. UAV reads, atomics,
+    counters and append/consume operations are not safe to approximate and make
+    the conversion fail explicitly.
+    """
+
+    write_records: Dict[int, Dict[str, Any]] = {}
+    unsupported: List[Dict[str, Any]] = []
+    output: List[str] = []
+
+    for line_number, line in enumerate(body.splitlines(), 1):
+        stripped = line.strip()
+        opcode_match = re.match(r"(?P<opcode>[A-Za-z_]\w*)\b", stripped)
+        opcode = opcode_match.group("opcode").lower() if opcode_match else ""
+
+        if opcode in UAV_WRITE_TYPES:
+            slot_match = re.search(r"\bu(?P<slot>\d+)(?:\.[xyzw]{1,4})?\b", stripped, re.IGNORECASE)
+            if not slot_match:
+                unsupported.append(
+                    {
+                        "operation": opcode,
+                        "slot": None,
+                        "register": None,
+                        "line": line_number,
+                        "reason": "UAV write register could not be parsed",
+                    }
+                )
+                continue
+
+            slot = int(slot_match.group("slot"))
+            record = write_records.setdefault(
+                slot,
+                {
+                    "slot": slot,
+                    "register": f"u{slot}",
+                    "resourceType": UAV_WRITE_TYPES[opcode],
+                    "operations": [],
+                    "writeCount": 0,
+                    "policy": "ignored_write_only_side_effect",
+                    "affectsMaterialOutputs": False,
+                    "sideEffectReproduced": False,
+                },
+            )
+
+            if opcode not in record["operations"]:
+                record["operations"].append(opcode)
+            record["writeCount"] += 1
+
+            # The instruction itself is intentionally omitted from Custom HLSL.
+            continue
+
+        unsupported_match = UAV_UNSUPPORTED_RE.search(stripped)
+        if unsupported_match:
+            slot_match = re.search(r"\bu(?P<slot>\d+)\b", stripped, re.IGNORECASE)
+            slot = int(slot_match.group("slot")) if slot_match else None
+            unsupported.append(
+                {
+                    "operation": unsupported_match.group(1).lower(),
+                    "slot": slot,
+                    "register": f"u{slot}" if slot is not None else None,
+                    "line": line_number,
+                    "reason": "UAV read/atomic/counter operation cannot be reproduced by a UE material",
+                }
+            )
+
+        output.append(line)
+
+    writes = [write_records[slot] for slot in sorted(write_records)]
+    warnings = [
+        (
+            f"{item['register']} UAV writes ({', '.join(item['operations'])}, "
+            f"count={item['writeCount']}) were removed; UE material preview "
+            "does not reproduce UAV side effects"
+        )
+        for item in writes
+    ]
+
+    return "\n".join(output), writes, unsupported, warnings
 
 # -----------------------------------------------------------------------------
 # Varying and temporary-register conversion
 # -----------------------------------------------------------------------------
-
 
 def required_component_count(name: str, body: str, fallback_type: str) -> int:
     maximum = 0
@@ -927,14 +1097,18 @@ def required_component_count(name: str, body: str, fallback_type: str) -> int:
     parsed = parse_hlsl_type(fallback_type)
     return parsed[1] if parsed else 4
 
-
 def adapt_inputs(
     body: str,
     parameters: List[Dict[str, Any]],
 ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
+    """Replace PS inputs and return only the layout data the exporter needs."""
     result = body
     setup_lines: List[str] = []
-    layout: List[Dict[str, Any]] = []
+    inputs: List[Dict[str, Any]] = []
+
+    def add_setup(line: str) -> None:
+        if line not in setup_lines:
+            setup_lines.append(line)
 
     for parameter in parameters:
         if parameter.get("direction") == "out" or not parameter.get("name"):
@@ -949,43 +1123,37 @@ def adapt_inputs(
 
         if semantic_matches(semantic, "SV_POSITION"):
             replacement = "RDC_SVPosition"
-            if not any("RDC_SVPosition" in line for line in setup_lines):
-                setup_lines.append("float4 RDC_SVPosition = Parameters.SvPosition;")
+            add_setup("float4 RDC_SVPosition = Parameters.SvPosition;")
 
         elif semantic_matches(semantic, "VELOCITY_PREV_POS"):
             replacement = "RDC_PreviousPosition"
-            if not any("RDC_SVPosition" in line for line in setup_lines):
-                setup_lines.append("float4 RDC_SVPosition = Parameters.SvPosition;")
-            if not any("RDC_PreviousPosition" in line for line in setup_lines):
-                setup_lines.append("float4 RDC_PreviousPosition = RDC_SVPosition;")
+            add_setup("float4 RDC_SVPosition = Parameters.SvPosition;")
+            add_setup("float4 RDC_PreviousPosition = RDC_SVPosition;")
 
         elif semantic_matches(semantic, "SV_ISFRONTFACE"):
             replacement = "RDC_IsFrontFace"
-            setup_lines.append("uint RDC_IsFrontFace = (FrontFace > 0.0) ? 1u : 0u;")
-            layout.append(
-                {
-                    "name": "FrontFace",
-                    "inputType": "CMOT_Float1",
-                    "semantic": semantic,
-                }
-            )
+            add_setup("uint RDC_IsFrontFace = (FrontFace > 0.0) ? 1u : 0u;")
+            inputs.append({"system": "FrontFace"})
 
         else:
             replacement = name.upper()
-            count = required_component_count(name, result, type_name)
-            layout.append(
-                {
-                    "name": replacement,
-                    "inputType": f"CMOT_Float{count}",
-                    "semantic": semantic,
-                    "sourceType": type_name,
-                }
-            )
+            type_info = parse_hlsl_type(type_name)
+            input_info = {
+                "input": replacement,
+                "semantic": semantic,
+                "components": required_component_count(name, result, type_name),
+                "type": type_info[0] if type_info else "float",
+            }
+            # 3DMigoto uses aliases such as v5 / w5 when several
+            # semantics share the same PS input register. Both refer to v5.
+            register_match = re.fullmatch(r"[vVwW](\d+)", name)
+            if register_match:
+                input_info["register"] = "v{}".format(register_match.group(1))
+            inputs.append(input_info)
 
         result = replace_token(result, name, replacement)
 
-    return result, setup_lines, layout
-
+    return result, setup_lines, inputs
 
 def initialize_register_declarations(body: str) -> str:
     declaration_re = re.compile(
@@ -1013,7 +1181,6 @@ def initialize_register_declarations(body: str) -> str:
 
     return "\n".join(output)
 
-
 def clean_decompiler_comments(body: str) -> str:
     lines = body.splitlines()
     output: List[str] = []
@@ -1027,11 +1194,9 @@ def clean_decompiler_comments(body: str) -> str:
 
     return "\n".join(output)
 
-
 # -----------------------------------------------------------------------------
 # Generated HLSL preamble and footer
 # -----------------------------------------------------------------------------
-
 
 def extract_source_defines(prefix: str) -> List[str]:
     lines = prefix.replace("\r\n", "\n").replace("\r", "\n").splitlines()
@@ -1056,7 +1221,6 @@ def extract_source_defines(prefix: str) -> List[str]:
         i += 1
 
     return result
-
 
 def build_data_macros(
     cb_slots: Set[int],
@@ -1118,7 +1282,6 @@ def build_data_macros(
 
     return lines
 
-
 def build_output_declarations(outputs: List[Dict[str, Any]]) -> List[str]:
     declarations = []
     for output in outputs:
@@ -1126,7 +1289,6 @@ def build_output_declarations(outputs: List[Dict[str, Any]]) -> List[str]:
             type_name = output.get("type", "float4")
             declarations.append(f"{type_name} {output['name']} = {zero_value(type_name)};")
     return declarations
-
 
 def build_surface_footer(outputs: List[Dict[str, Any]]) -> Tuple[List[str], Dict[str, Any]]:
     targets: Dict[int, str] = {}
@@ -1168,7 +1330,6 @@ def build_surface_footer(outputs: List[Dict[str, Any]]) -> Tuple[List[str], Dict
         "maskSource": mask,
     }
 
-
 def assemble_hlsl(
     source_defines: List[str],
     data_macros: List[str],
@@ -1202,16 +1363,15 @@ def assemble_hlsl(
 
     return "\n".join(lines).rstrip() + "\n"
 
-
 # -----------------------------------------------------------------------------
 # Validation and layout
 # -----------------------------------------------------------------------------
-
 
 def validate_hlsl(hlsl: str) -> None:
     forbidden = {
         "decompiler buffer opcode": r"\b(?:ld_structured_indexable|ld_raw_indexable|ld_typed_indexable|ld_buffer_indexable)\b",
         "decompiler buffer placeholder": r"no_StructuredBufferName",
+        "decompiler UAV opcode": r"\b(?:store_uav_(?:typed|raw|structured)|store_structured|ld_uav_(?:typed|raw|structured)|atomic_[A-Za-z_]\w*|imm_atomic_[A-Za-z_]\w*|uav_counter)\b",
         "dynamic BufferWidth pin": r"\bBufferWidthT\d+\b",
         "old BufferData input": r"\bBufferDataT\d+\b",
         "void return": r"\breturn\s*;",
@@ -1224,75 +1384,60 @@ def validate_hlsl(hlsl: str) -> None:
     if failures:
         raise ValueError("Generated HLSL validation failed: " + ", ".join(failures))
 
-
 def build_layout(
     cb_slots: Set[int],
     buffer_specs: Dict[int, Dict[str, Any]],
-    texture_slots: Set[int],
+    texture_usages: List[Dict[str, Any]],
+    texture_sampler_uses: List[Dict[str, Any]],
     varying_inputs: List[Dict[str, Any]],
-    surface: Dict[str, Any],
     data_width: int,
 ) -> Dict[str, Any]:
-    inputs: List[Dict[str, Any]] = []
+    """Write the minimal contract shared by the exporter and UE importer."""
+    layout: Dict[str, Any] = {"width": data_width}
 
     if cb_slots:
-        inputs.append(
+        layout["cb"] = sorted(cb_slots)
+
+    if buffer_specs:
+        buffers = []
+        for slot in sorted(buffer_specs):
+            spec = buffer_specs[slot]
+            item = {"slot": slot, "type": spec.get("type") or "Buffer"}
+            if spec.get("stride") is not None:
+                item["stride"] = spec["stride"]
+            buffers.append(item)
+        layout["buffers"] = buffers
+
+    if texture_usages:
+        layout["textures"] = [
             {
-                "name": "CBData",
-                "inputType": "TextureObject",
-                "packing": "one_uint32_per_rgba8_pixel; four_pixels_per_float4",
+                "slot": usage["slot"],
+                "data": bool(usage.get("isDataTexture")),
             }
-        )
+            for usage in texture_usages
+        ]
 
-    for slot in sorted(buffer_specs):
-        inputs.append(
-            {
-                "name": f"T{slot}Data",
-                "inputType": "TextureObject",
-                "register": f"t{slot}",
-                "dataTextureWidth": data_width,
-                "packing": "one_uint32_per_rgba8_pixel",
-                "bufferType": buffer_specs[slot].get("type"),
-                "stride": buffer_specs[slot].get("stride"),
-            }
-        )
+    sampler_uses = []
+    for usage in texture_sampler_uses:
+        sampler_slot = usage.get("samplerSlot")
+        if sampler_slot is None:
+            continue
+        sampler_uses.append({
+            "texture": usage["textureSlot"],
+            "sampler": sampler_slot,
+            "owner": usage["samplerOwnerSlot"],
+        })
+    if sampler_uses:
+        layout["samplers"] = sampler_uses
 
-    for slot in sorted(texture_slots):
-        inputs.append(
-            {
-                "name": f"T{slot}",
-                "inputType": "TextureObject",
-                "register": f"t{slot}",
-            }
-        )
+    varyings = [item for item in varying_inputs if "input" in item]
+    systems = [item["system"] for item in varying_inputs if "system" in item]
+    if varyings:
+        layout["varyings"] = varyings
+    if systems:
+        layout["system"] = systems
 
-    inputs.extend(varying_inputs)
-
-    return {
-        "version": TOOL_VERSION,
-        "generatedHlsl": "ue_custom_shader.hlsl",
-        "customInputs": inputs,
-        "mainOutput": {"name": "BaseColor", "type": "CMOT_Float3"},
-        "additionalOutputs": [
-            {"name": "Normal", "type": "CMOT_Float3"},
-            {"name": "Mask", "type": "CMOT_Float3"},
-        ],
-        "surfaceMapping": surface,
-        "textureSettings": {
-            "CBData": {"sRGB": False, "mipmaps": False, "filter": "Nearest"},
-            "TNData": {"sRGB": False, "mipmaps": False, "filter": "Nearest"},
-        },
-        "notes": [
-            "No BufferWidthTN scalar input is required.",
-            f"All raw data textures are addressed with compile-time width {data_width}.",
-        ],
-    }
-
-
-# -----------------------------------------------------------------------------
-# Conversion pipeline
-# -----------------------------------------------------------------------------
-
+    return layout
 
 def convert_shader(
     input_path: str,
@@ -1318,7 +1463,20 @@ def convert_shader(
     body = remove_final_void_return(remove_outer_indent(shell["body"]))
     body = clean_decompiler_comments(body)
 
-    body, used_texture_slots, sampler_owner_slots, texture_warnings = replace_texture_accesses(
+    body, uav_writes, unsupported_uavs, uav_warnings = strip_uav_side_effects(body)
+    if unsupported_uavs:
+        details = ", ".join(
+            "{}{}".format(
+                item.get("operation", "unknown"),
+                "@{}".format(item["register"]) if item.get("register") else "",
+            )
+            for item in unsupported_uavs
+        )
+        raise ValueError(
+            "Unsupported UAV read/atomic/counter operations: {}".format(details)
+        )
+
+    body, texture_usages, texture_sampler_uses, texture_warnings = replace_texture_accesses(
         body,
         resources,
     )
@@ -1331,11 +1489,10 @@ def convert_shader(
     body, setup_lines, varying_inputs = adapt_inputs(body, input_parameters)
     body = initialize_register_declarations(body)
 
-    texture_slots = used_texture_slots | sampler_owner_slots
     source_defines = extract_source_defines(shell["prefix"])
     data_macros = build_data_macros(cb_slots, buffer_specs, data_width)
     output_declarations = build_output_declarations(output_parameters)
-    footer, surface = build_surface_footer(output_parameters)
+    footer, _surface = build_surface_footer(output_parameters)
 
     final_hlsl = assemble_hlsl(
         source_defines,
@@ -1347,12 +1504,21 @@ def convert_shader(
     )
     validate_hlsl(final_hlsl)
 
+    # Converter warning 同时写入返回结果和 layout。
+    warnings = list(texture_warnings) + list(uav_warnings)
+
+    if shell["suffix"].strip():
+        warnings.append(
+            "Source text after main() was not merged "
+            "into the Custom node body"
+        )
+
     layout = build_layout(
         cb_slots,
         buffer_specs,
-        texture_slots,
+        texture_usages,
+        texture_sampler_uses,
         varying_inputs,
-        surface,
         data_width,
     )
 
@@ -1360,10 +1526,6 @@ def convert_shader(
     layout_path = output_path / "ue_custom_layout.json"
     write_text(hlsl_path, final_hlsl)
     write_json(layout_path, layout)
-
-    warnings = list(texture_warnings)
-    if shell["suffix"].strip():
-        warnings.append("Source text after main() was not merged into the Custom node body")
 
     print(f"[RDC2UE] HLSL:   {hlsl_path}")
     print(f"[RDC2UE] Layout: {layout_path}")
@@ -1379,8 +1541,6 @@ def convert_shader(
         "warnings": warnings,
     }
 
-
-
 def convert_hlsl_file(
     input_hlsl_path: str,
     output_dir: str,
@@ -1394,36 +1554,3 @@ def convert_hlsl_file(
         data_width,
     )
 
-
-def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Convert a decompiled pixel shader to UE4 Custom-node HLSL."
-    )
-    parser.add_argument("input_hlsl", help="Input decompiled HLSL file")
-    parser.add_argument("output_dir", nargs="?", help="Optional output directory")
-    parser.add_argument(
-        "--data-width",
-        type=int,
-        default=DEFAULT_DATA_TEXTURE_WIDTH,
-        help=f"Raw CB/Buffer data texture width (default: {DEFAULT_DATA_TEXTURE_WIDTH})",
-    )
-    return parser
-
-
-def main() -> int:
-    args = build_argument_parser().parse_args()
-
-    try:
-        convert_hlsl_file(
-            args.input_hlsl,
-            args.output_dir,
-            args.data_width,
-        )
-        return 0
-    except Exception as exc:
-        print(f"[RDC2UE][error] {exc}", file=sys.stderr)
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
