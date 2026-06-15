@@ -4,6 +4,9 @@
 #   meshes/mesh_eid_xxx.json + mesh_eid_xxx.bin
 #   materials/mat_eid_xxx.json
 #   textures/tex_xxx.png
+#   shaders/eid_xxx/ps_decompiled.hlsl
+#   shaders/eid_xxx/ue_custom_shader.hlsl
+#   shaders/eid_xxx/ue_custom_layout.json
 
 import os
 import json
@@ -17,13 +20,16 @@ import renderdoc as rd
 # 全局配置
 # ============================================================
 
-RANGE_START_EID = 7890
-RANGE_END_EID = 13075
-
+# 当前需要导出的 draw 范围
 RANGE_START_EID = 9197
 RANGE_END_EID = 9892
 
-DEFAULT_OUTPUT_DIR = r"F:\RDC2UE\ExportResults"
+# 工程目录和输出目录都跟随当前扩展，不再写绝对路径。
+EXTENSION_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_OUTPUT_DIR = os.path.join(EXTENSION_DIR, "ExportResults")
+
+# converter 与数据纹理共同使用的固定宽度。
+CONVERTER_DATA_WIDTH = 4096
 
 EXPORT_PROFILE = "pc" # "pc" | "mobile"
 
@@ -103,6 +109,7 @@ def create_export_paths(output_dir, start_eid, end_eid):
         "meshes": os.path.join(range_dir, "meshes"),
         "materials": os.path.join(range_dir, "materials"),
         "textures": os.path.join(range_dir, "textures"),
+        "shaders": os.path.join(range_dir, "shaders"),
     }
 
 
@@ -111,6 +118,7 @@ def ensure_export_dirs(paths):
     os.makedirs(paths["meshes"], exist_ok=True)
     os.makedirs(paths["materials"], exist_ok=True)
     os.makedirs(paths["textures"], exist_ok=True)
+    os.makedirs(paths["shaders"], exist_ok=True)
 
 
 def make_rel_path(path, base_dir):
@@ -150,6 +158,13 @@ def make_texture_path(paths, texture_id):
     return os.path.join(
         paths["textures"],
         make_texture_filename(texture_id)
+    )
+
+
+def make_shader_dir(paths, event_id):
+    return os.path.join(
+        paths["shaders"],
+        "eid_{}".format(event_id)
     )
 
 
@@ -570,6 +585,40 @@ def write_scene_json(scene_path, draw_results):
 
     with open(scene_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+# ============================================================
+# HLSL Converter
+# ============================================================
+
+def run_hlsl_converter(input_hlsl_path, shader_dir):
+    """
+    直接调用同扩展目录下的 converter。
+
+    input_hlsl_path 必须是当前 draw 已经写出的 ps_decompiled.hlsl。
+    该函数只负责转换，不负责提取或复制 Shader。
+    """
+    if not os.path.isfile(input_hlsl_path):
+        raise FileNotFoundError(
+            "反编译 HLSL 不存在: {}".format(input_hlsl_path)
+        )
+
+    os.makedirs(shader_dir, exist_ok=True)
+
+    from . import rdc2ue_hlsl_converter
+
+    result = rdc2ue_hlsl_converter.convert_hlsl_file(
+        input_hlsl_path,
+        shader_dir,
+        CONVERTER_DATA_WIDTH
+    )
+
+    return {
+        "sourcePath": input_hlsl_path,
+        "hlslPath": result["hlsl"],
+        "layoutPath": result["layout"],
+        "warnings": result["warnings"],
+    }
 
 
 # ============================================================

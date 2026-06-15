@@ -1,8 +1,10 @@
 import importlib
 import qrenderdoc as qrd
 
+
 def _log(msg):
     print("[RDC2UE]" + msg)
+
 
 def export_draw_range_callback(ctx, data):
     _log("Export Draw Range clicked")
@@ -15,9 +17,10 @@ def export_draw_range_callback(ctx, data):
         if result is None:
             _log("Range export failed")
             return
-        
+
     except Exception as e:
         _log("Range export failed: {}".format(e))
+
 
 def register(version, ctx):
     _log("Register RDC2UE plugin")
@@ -27,6 +30,7 @@ def register(version, ctx):
         ["RDC2UE", "Export Draw Range"],
         export_draw_range_callback
     )
+
 
 def unregister():
     _log("Unregister RDC2UE plugin")
